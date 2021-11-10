@@ -46,6 +46,18 @@ import org.xml.sax.InputSource;
  */
 public class JdbcSQLXML extends JdbcLob implements SQLXML {
 
+    private static final Map<String,Boolean> secureFeatureMap = new HashMap<>();
+    private static final EntityResolver NOOP_ENTITY_RESOLVER = (publicId, systemId) -> new InputSource(new StringReader(""));
+    private static final URIResolver NOOP_URI_RESOLVER = (href, base) -> new StreamSource(new StringReader(""));
+
+    static {
+        secureFeatureMap.put(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        secureFeatureMap.put("http://apache.org/xml/features/disallow-doctype-decl", true);
+        secureFeatureMap.put("http://xml.org/sax/features/external-general-entities", false);
+        secureFeatureMap.put("http://xml.org/sax/features/external-parameter-entities", false);
+        secureFeatureMap.put("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+    }
+
     private DOMResult domResult;
 
     /**
@@ -104,18 +116,44 @@ public class JdbcSQLXML extends JdbcLob implements SQLXML {
         try {
             if (isDebugEnabled()) {
                 debugCodeCall(
-                        "getSource(" + (sourceClass != null ? sourceClass.getSimpleName() + ".class" : "null") + ')');
+                        "setResult(" + (resultClass != null ? resultClass.getSimpleName() + ".class" : "null") + ')');
             }
             checkReadable();
+            // According to https://cheatsheetseries.owasp.org/cheatsheets/XML_External_Entity_Prevention_Cheat_Sheet.html
             if (sourceClass == null || sourceClass == DOMSource.class) {
                 DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-                return (T) new DOMSource(dbf.newDocumentBuilder().parse(new InputSource(value.getInputStream())));
+                for (Map.Entry<String,Boolean> entry : secureFeatureMap.entrySet()) {
+                    try {
+                        dbf.setFeature(entry.getKey(), entry.getValue());
+                    } catch (Exception ignore) {/**/}
+                }
+                dbf.setXIncludeAware(false);
+                dbf.setExpandEntityReferences(false);
+                dbf.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+                DocumentBuilder db = dbf.newDocumentBuilder();
+                db.setEntityResolver(NOOP_ENTITY_RESOLVER);
+                return (T) new DOMSource(db.parse(new InputSource(value.getInputStream())));
             } else if (sourceClass == SAXSource.class) {
-                return (T) new SAXSource(new InputSource(value.getInputStream()));
+                XMLReader reader = XMLReaderFactory.createXMLReader();
+                for (Map.Entry<String,Boolean> entry : secureFeatureMap.entrySet()) {
+                    try {
+                        reader.setFeature(entry.getKey(), entry.getValue());
+                    } catch (Exception ignore) {/**/}
+                }
+                reader.setEntityResolver(NOOP_ENTITY_RESOLVER);
+                return (T) new SAXSource(reader, new InputSource(value.getInputStream()));
             } else if (sourceClass == StAXSource.class) {
                 XMLInputFactory xif = XMLInputFactory.newInstance();
+                xif.setProperty(XMLInputFactory.SUPPORT_DTD, false);
+                xif.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+                xif.setProperty("javax.xml.stream.isSupportingExternalEntities", false);
                 return (T) new StAXSource(xif.createXMLStreamReader(value.getInputStream()));
             } else if (sourceClass == StreamSource.class) {
+                TransformerFactory tf = TransformerFactory.newInstance();
+                tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+                tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+                tf.setURIResolver(NOOP_URI_RESOLVER);
+                tf.newTransformer().transform(new StreamSource(value.getInputStream()), new SAXResult(new DefaultHandler()));
                 return (T) new StreamSource(value.getInputStream());
             }
             throw unsupported(sourceClass.getName());
@@ -165,7 +203,7 @@ public class JdbcSQLXML extends JdbcLob implements SQLXML {
         try {
             if (isDebugEnabled()) {
                 debugCodeCall(
-                        "getSource(" + (resultClass != null ? resultClass.getSimpleName() + ".class" : "null") + ')');
+                        "setResult(" + (resultClass != null ? resultClass.getSimpleName() + ".class" : "null") + ')');
             }
             checkEditable();
             if (resultClass == null || resultClass == DOMResult.class) {
